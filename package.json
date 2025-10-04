@@ -1,0 +1,29 @@
+{
+  "name": "ticket-sniper-backend",
+  "version": "1.0.0",
+  "description": "Backend API for Ticket Sniper mobile app",
+  "main": "dist/server.js",
+  "engines": { "node": ">=18.0.0" },
+  "scripts": {
+    "dev": "tsx --env-file=.env src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "vercel-build": "tsc",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "stripe": "^18.5.0",
+    "winston": "^3.18.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.6.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}
