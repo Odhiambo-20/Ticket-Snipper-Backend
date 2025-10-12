@@ -1,20 +1,24 @@
 // src/routes/shows.ts
 import express from 'express';
 import axios from 'axios';
+import Stripe from 'stripe';
 import { logger } from '../utils/logger';
 
 const router = express.Router();
 
 const SEATGEEK_API_BASE = 'https://api.seatgeek.com/2';
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-08-27.basil' }); // Use latest API version
 
 const verifyApiKey = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const apiKey = req.headers['x-api-key'] as string | undefined;
   const expectedApiKey = process.env.TICKET_API_KEY;
 
   if (!expectedApiKey) {
+    logger.error('TICKET_API_KEY not configured');
     return res.status(500).json({ success: false, error: 'Configuration Error', message: 'TICKET_API_KEY not configured' });
   }
   if (!apiKey || apiKey !== expectedApiKey) {
+    logger.warn('Unauthorized access attempt', { apiKey });
     return res.status(401).json({ success: false, error: 'Unauthorized', message: 'Invalid API key' });
   }
   next();
@@ -23,34 +27,25 @@ const verifyApiKey = (req: express.Request, res: express.Response, next: express
 // Fetch events directly from SeatGeek API
 router.get('/', verifyApiKey, async (req, res) => {
   try {
-    if (!process.env.SEATGEEK_CLIENT_ID) {
+    const clientId = process.env.SEATGEEK_CLIENT_ID;
+    if (!clientId) {
+      logger.error('SeatGeek CLIENT_ID missing');
       return res.status(500).json({ success: false, error: 'Configuration Error', message: 'SeatGeek CLIENT_ID missing' });
     }
 
-    // Pass through query parameters to SeatGeek
-    const queryParams: any = {
-      client_id: process.env.SEATGEEK_CLIENT_ID,
-      ...req.query
-    };
+    const queryParams: any = { client_id: clientId, ...req.query };
 
     logger.info('Fetching events from SeatGeek', { params: queryParams });
     
-    const response = await axios.get(
-      `${SEATGEEK_API_BASE}/events`,
-      {
-        params: queryParams,
-        timeout: 10000,
-      }
-    );
+    const response = await axios.get(`${SEATGEEK_API_BASE}/events`, {
+      params: queryParams,
+      timeout: 10000,
+      headers: { 'User-Agent': 'TicketSnipper/1.0' }, // Identify your app
+    });
 
     logger.info(`SeatGeek Response: ${response.data.events?.length || 0} events found`);
 
-    // Return authentic SeatGeek response
-    res.json({ 
-      success: true, 
-      data: response.data,
-      timestamp: new Date().toISOString() 
-    });
+    res.json({ success: true, data: response.data, timestamp: new Date().toISOString() });
   } catch (error) {
     logger.error('Failed to fetch shows', { error: (error as Error).message });
     res.status(500).json({ success: false, error: 'Failed to fetch shows', message: (error as Error).message });
@@ -60,7 +55,9 @@ router.get('/', verifyApiKey, async (req, res) => {
 // Fetch single event directly from SeatGeek API
 router.get('/:id', verifyApiKey, async (req, res) => {
   try {
-    if (!process.env.SEATGEEK_CLIENT_ID) {
+    const clientId = process.env.SEATGEEK_CLIENT_ID;
+    if (!clientId) {
+      logger.error('SeatGeek CLIENT_ID missing');
       return res.status(500).json({ success: false, error: 'Configuration Error', message: 'SeatGeek CLIENT_ID missing' });
     }
 
@@ -68,24 +65,15 @@ router.get('/:id', verifyApiKey, async (req, res) => {
     
     logger.info(`Fetching event details for ID: ${id}`);
     
-    const response = await axios.get(
-      `${SEATGEEK_API_BASE}/events/${id}`, 
-      {
-        params: { 
-          client_id: process.env.SEATGEEK_CLIENT_ID,
-        },
-        timeout: 5000,
-      }
-    );
+    const response = await axios.get(`${SEATGEEK_API_BASE}/events/${id}`, {
+      params: { client_id: clientId },
+      timeout: 5000,
+      headers: { 'User-Agent': 'TicketSnipper/1.0' },
+    });
 
     logger.info(`Event found: ${response.data.title || response.data.short_title}`);
 
-    // Return authentic SeatGeek response
-    res.json({ 
-      success: true, 
-      data: response.data,
-      timestamp: new Date().toISOString() 
-    });
+    res.json({ success: true, data: response.data, timestamp: new Date().toISOString() });
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 404) {
       return res.status(404).json({ success: false, error: 'Show not found', message: `No event found with ID: ${req.params.id}` });
@@ -95,79 +83,62 @@ router.get('/:id', verifyApiKey, async (req, res) => {
   }
 });
 
-// Reserve endpoint - uses SeatGeek data for checkout
+// Reserve endpoint with Stripe integration
 router.post('/:id/reserve', verifyApiKey, async (req, res) => {
   try {
-    if (!process.env.SEATGEEK_CLIENT_ID) {
+    const clientId = process.env.SEATGEEK_CLIENT_ID;
+    if (!clientId) {
+      logger.error('SeatGeek CLIENT_ID missing');
       return res.status(500).json({ success: false, error: 'Configuration Error', message: 'SeatGeek CLIENT_ID missing' });
     }
 
     const { id } = req.params;
-    const { quantity = 1, price } = req.body;
-    
-    // Fetch event from SeatGeek
-    const response = await axios.get(
-      `${SEATGEEK_API_BASE}/events/${id}`, 
-      {
-        params: { 
-          client_id: process.env.SEATGEEK_CLIENT_ID,
-        },
-        timeout: 5000,
-      }
-    );
+    const { quantity = 1, price, userEmail, userName } = req.body;
 
-    const event = response.data;
-
-    // Validate that price is provided
     if (!price || price <= 0) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Price required', 
-        message: 'Price must be provided in the request body' 
-      });
+      return res.status(400).json({ success: false, error: 'Price required', message: 'Price must be provided in the request body' });
+    }
+    if (!userEmail || !userName) {
+      return res.status(400).json({ success: false, error: 'User details required', message: 'userEmail and userName must be provided' });
     }
 
-    // Generate IDs
+    const eventResponse = await axios.get(`${SEATGEEK_API_BASE}/events/${id}`, {
+      params: { client_id: clientId },
+      timeout: 5000,
+      headers: { 'User-Agent': 'TicketSnipper/1.0' },
+    });
+
+    const event = eventResponse.data;
+
     const seatId = `SEAT-${id}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const reservationId = `RES-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    
-    // Try to create checkout session, but don't fail if it's not available
-    let checkoutUrl = null;
-    let sessionId = null;
-    
-    try {
-      const checkoutResponse = await axios.post(
-        `${req.protocol}://${req.get('host')}/api/payments/stripe/create-checkout-session`,
-        { 
-          eventId: id, 
-          seatId, 
-          quantity, 
-          eventTitle: event.title || event.short_title, 
-          price: price
-        },
-        { 
-          headers: { 'x-api-key': process.env.TICKET_API_KEY }, 
-          timeout: 5000,
-          validateStatus: (status) => status < 500 // Don't throw on 4xx errors
-        }
-      );
 
-      const checkoutData = checkoutResponse.data as { 
-        success: boolean; 
-        checkoutUrl?: string; 
-        sessionId?: string; 
-        message?: string 
-      };
-      
-      if (checkoutData.success && checkoutData.checkoutUrl) {
-        checkoutUrl = checkoutData.checkoutUrl;
-        sessionId = checkoutData.sessionId;
-      } else {
-        logger.warn('Checkout session creation failed', { message: checkoutData.message });
-      }
-    } catch (checkoutError) {
-      logger.warn('Checkout endpoint unavailable', { error: (checkoutError as Error).message });
-    }
+    // Create Stripe Checkout Session
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: event.title || event.short_title,
+          },
+          unit_amount: Math.round(price * 100), // Convert to cents
+        },
+        quantity,
+      }],
+      mode: 'payment',
+      success_url: `${process.env.BASE_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.BASE_URL}/cancel`,
+      customer_email: userEmail,
+      metadata: {
+        reservationId,
+        eventId: id,
+        seatId,
+        userName,
+      },
+    });
+
+    logger.info(`Stripe Checkout Session created: ${session.id}`);
 
     res.json({
       success: true,
@@ -178,25 +149,77 @@ router.post('/:id/reserve', verifyApiKey, async (req, res) => {
       totalPrice: price * quantity,
       pricePerTicket: price,
       seatId,
-      checkoutUrl,
-      sessionId,
-      message: checkoutUrl ? 'Checkout session created' : 'Reservation created - checkout unavailable',
-      eventData: event, // Include full SeatGeek event data
+      checkoutUrl: session.url,
+      sessionId: session.id,
+      message: 'Checkout session created',
+      eventData: event,
     });
   } catch (error) {
     if (axios.isAxiosError(error) && error.response?.status === 404) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Event not found', 
-        message: `No event with ID: ${req.params.id}` 
-      });
+      return res.status(404).json({ success: false, error: 'Event not found', message: `No event with ID: ${req.params.id}` });
     }
     logger.error('Reservation failed', { error: (error as Error).message });
-    res.status(500).json({ 
-      success: false, 
-      error: 'Reservation failed', 
-      message: (error as Error).message 
+    res.status(500).json({ success: false, error: 'Reservation failed', message: (error as Error).message });
+  }
+});
+
+// Confirm reservation (e.g., after Stripe payment webhook)
+router.post('/:id/confirm', verifyApiKey, async (req, res) => {
+  try {
+    const clientId = process.env.SEATGEEK_CLIENT_ID;
+    if (!clientId) {
+      logger.error('SeatGeek CLIENT_ID missing');
+      return res.status(500).json({ success: false, error: 'Configuration Error', message: 'SeatGeek CLIENT_ID missing' });
+    }
+
+    const { id } = req.params;
+    const { reservationId, paymentIntentId } = req.body;
+
+    if (!reservationId || !paymentIntentId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Required fields missing', 
+        message: 'reservationId and paymentIntentId must be provided' 
+      });
+    }
+
+    // Verify event exists
+    const eventResponse = await axios.get(`${SEATGEEK_API_BASE}/events/${id}`, {
+      params: { client_id: clientId },
+      timeout: 5000,
+      headers: { 'User-Agent': 'TicketSnipper/1.0' },
     });
+
+    const event = eventResponse.data;
+
+    // Verify payment with Stripe
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    if (paymentIntent.status !== 'succeeded') {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Payment not successful', 
+        message: 'Payment intent not completed' 
+      });
+    }
+
+    // In a production environment, update a database with confirmed status
+    logger.info(`Confirmed reservation ${reservationId} for event ${id}`);
+
+    res.json({
+      success: true,
+      reservationId,
+      eventId: id,
+      eventTitle: event.title || event.short_title,
+      status: 'confirmed',
+      message: 'Reservation confirmed successfully',
+      eventData: event,
+    });
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return res.status(404).json({ success: false, error: 'Event not found', message: `No event with ID: ${req.params.id}` });
+    }
+    logger.error('Reservation confirmation failed', { error: (error as Error).message });
+    res.status(500).json({ success: false, error: 'Reservation confirmation failed', message: (error as Error).message });
   }
 });
 
