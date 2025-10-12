@@ -127,45 +127,60 @@ router.post('/:id/reserve', verifyApiKey, async (req, res) => {
       });
     }
 
-    // Generate seat ID
+    // Generate IDs
     const seatId = `SEAT-${id}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const reservationId = `RES-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     
-    // Create checkout session with provided price
-    const checkoutResponse = await axios.post(
-      `${req.protocol}://${req.get('host')}/api/payments/stripe/create-checkout-session`,
-      { 
-        eventId: id, 
-        seatId, 
-        quantity, 
-        eventTitle: event.title || event.short_title, 
-        price: price
-      },
-      { headers: { 'x-api-key': process.env.TICKET_API_KEY }, timeout: 5000 }
-    );
+    // Try to create checkout session, but don't fail if it's not available
+    let checkoutUrl = null;
+    let sessionId = null;
+    
+    try {
+      const checkoutResponse = await axios.post(
+        `${req.protocol}://${req.get('host')}/api/payments/stripe/create-checkout-session`,
+        { 
+          eventId: id, 
+          seatId, 
+          quantity, 
+          eventTitle: event.title || event.short_title, 
+          price: price
+        },
+        { 
+          headers: { 'x-api-key': process.env.TICKET_API_KEY }, 
+          timeout: 5000,
+          validateStatus: (status) => status < 500 // Don't throw on 4xx errors
+        }
+      );
 
-    const checkoutData = checkoutResponse.data as { 
-      success: boolean; 
-      checkoutUrl?: string; 
-      sessionId?: string; 
-      message?: string 
-    };
-    
-    if (!checkoutData.success || !checkoutData.checkoutUrl) {
-      throw new Error(checkoutData.message || 'Checkout failed');
+      const checkoutData = checkoutResponse.data as { 
+        success: boolean; 
+        checkoutUrl?: string; 
+        sessionId?: string; 
+        message?: string 
+      };
+      
+      if (checkoutData.success && checkoutData.checkoutUrl) {
+        checkoutUrl = checkoutData.checkoutUrl;
+        sessionId = checkoutData.sessionId;
+      } else {
+        logger.warn('Checkout session creation failed', { message: checkoutData.message });
+      }
+    } catch (checkoutError) {
+      logger.warn('Checkout endpoint unavailable', { error: (checkoutError as Error).message });
     }
 
-    const reservationId = `RES-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     res.json({
       success: true,
       reservationId,
       eventId: id,
       eventTitle: event.title || event.short_title,
       quantity,
-      estimatedPrice: price * quantity,
-      checkoutUrl: checkoutData.checkoutUrl,
-      sessionId: checkoutData.sessionId,
+      totalPrice: price * quantity,
+      pricePerTicket: price,
       seatId,
-      message: 'Redirecting to Stripe',
+      checkoutUrl,
+      sessionId,
+      message: checkoutUrl ? 'Checkout session created' : 'Reservation created - checkout unavailable',
       eventData: event, // Include full SeatGeek event data
     });
   } catch (error) {
