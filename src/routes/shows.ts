@@ -7,7 +7,7 @@ import { logger } from '../utils/logger';
 const router = express.Router();
 
 const SEATGEEK_API_BASE = 'https://api.seatgeek.com/2';
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-08-27.basil' }); // Use latest API version
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-08-27.basil' });
 
 const verifyApiKey = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const apiKey = req.headers['x-api-key'] as string | undefined;
@@ -40,7 +40,7 @@ router.get('/', verifyApiKey, async (req, res) => {
     const response = await axios.get(`${SEATGEEK_API_BASE}/events`, {
       params: queryParams,
       timeout: 10000,
-      headers: { 'User-Agent': 'TicketSnipper/1.0' }, // Identify your app
+      headers: { 'User-Agent': 'TicketSnipper/1.0' },
     });
 
     logger.info(`SeatGeek Response: ${response.data.events?.length || 0} events found`);
@@ -113,7 +113,18 @@ router.post('/:id/reserve', verifyApiKey, async (req, res) => {
     const seatId = `SEAT-${id}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const reservationId = `RES-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    // Create Stripe Checkout Session
+    // Require BASE_URL in production, no fallback
+    const baseUrl = process.env.BASE_URL;
+    if (!baseUrl) {
+      logger.error('BASE_URL not configured');
+      return res.status(500).json({ success: false, error: 'Configuration Error', message: 'BASE_URL must be configured in production' });
+    }
+    if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+      logger.error('BASE_URL missing scheme');
+      return res.status(500).json({ success: false, error: 'Configuration Error', message: 'BASE_URL must include http:// or https:// scheme' });
+    }
+
+    // Create Stripe Checkout Session with deep link for mobile app
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [{
@@ -127,8 +138,8 @@ router.post('/:id/reserve', verifyApiKey, async (req, res) => {
         quantity,
       }],
       mode: 'payment',
-      success_url: `${process.env.BASE_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.BASE_URL}/cancel`,
+      success_url: process.env.FRONTEND_URL || `${baseUrl}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/cancel`,
       customer_email: userEmail,
       metadata: {
         reservationId,
@@ -183,7 +194,6 @@ router.post('/:id/confirm', verifyApiKey, async (req, res) => {
       });
     }
 
-    // Verify event exists
     const eventResponse = await axios.get(`${SEATGEEK_API_BASE}/events/${id}`, {
       params: { client_id: clientId },
       timeout: 5000,
@@ -192,7 +202,6 @@ router.post('/:id/confirm', verifyApiKey, async (req, res) => {
 
     const event = eventResponse.data;
 
-    // Verify payment with Stripe
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
     if (paymentIntent.status !== 'succeeded') {
       return res.status(400).json({ 
@@ -202,7 +211,6 @@ router.post('/:id/confirm', verifyApiKey, async (req, res) => {
       });
     }
 
-    // In a production environment, update a database with confirmed status
     logger.info(`Confirmed reservation ${reservationId} for event ${id}`);
 
     res.json({
