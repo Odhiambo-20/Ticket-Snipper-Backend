@@ -107,18 +107,7 @@ const fetchGeneralEvents = async (perPage: number = 100): Promise<SeatGeekEvent[
   }
 };
 
-// Helper function to check if event has valid pricing
-const hasValidPricing = (event: SeatGeekEvent): boolean => {
-  if (!event.stats) return false;
-  
-  const hasPrice = (event.stats.lowest_price && event.stats.lowest_price > 0) || 
-                   (event.stats.average_price && event.stats.average_price > 0);
-  const hasSeats = event.stats.listing_count && event.stats.listing_count > 0;
-  
-  return !!(hasPrice && hasSeats);
-};
-
-// Combine both API calls and return all unique events WITH PRICING ONLY
+// Combine both API calls and return ALL unique events
 const fetchAllEvents = async (location?: string): Promise<SeatGeekEvent[]> => {
   const allEvents: SeatGeekEvent[] = [];
   const uniqueEventIds = new Set<number>();
@@ -127,7 +116,7 @@ const fetchAllEvents = async (location?: string): Promise<SeatGeekEvent[]> => {
   if (location) {
     const cityEvents = await fetchEventsByCity(location, 100);
     for (const event of cityEvents) {
-      if (!uniqueEventIds.has(event.id) && hasValidPricing(event)) {
+      if (!uniqueEventIds.has(event.id)) {
         allEvents.push(event);
         uniqueEventIds.add(event.id);
       }
@@ -137,13 +126,13 @@ const fetchAllEvents = async (location?: string): Promise<SeatGeekEvent[]> => {
   // API CALL 2: General events
   const generalEvents = await fetchGeneralEvents(100);
   for (const event of generalEvents) {
-    if (!uniqueEventIds.has(event.id) && hasValidPricing(event)) {
+    if (!uniqueEventIds.has(event.id)) {
       allEvents.push(event);
       uniqueEventIds.add(event.id);
     }
   }
 
-  logger.info(`Total events with valid pricing: ${allEvents.length}`);
+  logger.info(`Total unique events from SeatGeek: ${allEvents.length}`);
   return allEvents;
 };
 
@@ -156,25 +145,25 @@ router.get('/', verifyApiKey, async (req, res) => {
     const { location = 'New York', fetch_all = 'true' } = req.query;
     let events: SeatGeekEvent[] = [];
 
-    logger.info('=== FETCHING EVENTS WITH PRICING ONLY ===');
+    logger.info('=== FETCHING ALL EVENTS FROM SEATGEEK ===');
 
     if (fetch_all === 'true') {
       events = await fetchAllEvents(location as string);
     } else {
-      const cityEvents = await fetchEventsByCity(location as string, 25);
-      // Filter to only events with valid pricing
-      events = cityEvents.filter(hasValidPricing);
+      events = await fetchEventsByCity(location as string, 25);
     }
 
-    logger.info(`Processing ${events.length} events with valid pricing`);
+    logger.info(`Processing ${events.length} events from SeatGeek API`);
 
-    // Map events to shows - ALL events here have pricing guaranteed
+    // Map ALL events - display exactly what SeatGeek returns
     const shows: Show[] = events.map((event) => {
       const primaryPerformer = event.performers.find((p) => p.primary) || event.performers[0] || { name: 'Various Artists', image: '' };
       
-      // Safe to use ! because we filtered above
-      const lowestPrice = event.stats!.lowest_price || event.stats!.average_price!;
-      const listingCount = event.stats!.listing_count!;
+      // Get stats if they exist, use actual values from API
+      const listingCount = event.stats?.listing_count ?? 0;
+      const lowestPrice = event.stats?.lowest_price ?? 0;
+      const averagePrice = event.stats?.average_price ?? 0;
+      const price = lowestPrice || averagePrice;
 
       return {
         id: event.id.toString(),
@@ -185,15 +174,15 @@ router.get('/', verifyApiKey, async (req, res) => {
         city: `${event.venue?.city || 'Unknown'}, ${event.venue?.state || ''}`,
         saleTime: formatTime(event.datetime_local),
         availableSeats: listingCount,
-        price: Math.round(lowestPrice),
+        price: price > 0 ? Math.round(price) : 0,
         sections: ['General Admission'],
         imageUrl: primaryPerformer.image || '',
         eventUrl: event.url || '',
-        isAvailable: true,
+        isAvailable: listingCount > 0 && price > 0,
       };
     });
 
-    logger.info(`Returning ${shows.length} shows with valid pricing`);
+    logger.info(`Returning ${shows.length} shows from SeatGeek`);
 
     res.json({ 
       success: true, 
@@ -225,20 +214,12 @@ router.get('/:id', verifyApiKey, async (req, res) => {
     });
 
     const event = response.data;
-    
-    // Check if event has valid pricing
-    if (!hasValidPricing(event)) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'No pricing available', 
-        message: `Event ${id} does not have pricing information` 
-      });
-    }
-
     const primaryPerformer = event.performers.find((p) => p.primary) || event.performers[0] || { name: 'Various Artists', image: '' };
     
-    const lowestPrice = event.stats!.lowest_price || event.stats!.average_price!;
-    const listingCount = event.stats!.listing_count!;
+    const listingCount = event.stats?.listing_count ?? 0;
+    const lowestPrice = event.stats?.lowest_price ?? 0;
+    const averagePrice = event.stats?.average_price ?? 0;
+    const price = lowestPrice || averagePrice;
 
     const show: Show = {
       id: event.id.toString(),
@@ -249,11 +230,11 @@ router.get('/:id', verifyApiKey, async (req, res) => {
       city: `${event.venue?.city || 'Unknown'}, ${event.venue?.state || ''}`,
       saleTime: formatTime(event.datetime_local),
       availableSeats: listingCount,
-      price: Math.round(lowestPrice),
+      price: price > 0 ? Math.round(price) : 0,
       sections: ['General Admission'],
       imageUrl: primaryPerformer.image || '',
       eventUrl: event.url || '',
-      isAvailable: true,
+      isAvailable: listingCount > 0 && price > 0,
     };
 
     res.json({ success: true, show, timestamp: new Date().toISOString() });
@@ -283,23 +264,32 @@ router.post('/:id/reserve', verifyApiKey, async (req, res) => {
     });
 
     const event = response.data;
-    
-    if (!hasValidPricing(event)) {
+    const listingCount = event.stats?.listing_count ?? 0;
+    const lowestPrice = event.stats?.lowest_price ?? 0;
+    const averagePrice = event.stats?.average_price ?? 0;
+    const price = lowestPrice || averagePrice;
+
+    if (listingCount === 0) {
       return res.status(400).json({ 
         success: false, 
-        error: 'No pricing available', 
-        message: `Event does not have valid pricing` 
+        error: 'No tickets available', 
+        message: `No tickets available for ${event.title}` 
       });
     }
-
-    const listingCount = event.stats!.listing_count!;
-    const lowestPrice = event.stats!.lowest_price || event.stats!.average_price!;
 
     if (listingCount < quantity) {
       return res.status(400).json({ 
         success: false, 
         error: 'Insufficient tickets', 
         message: `Only ${listingCount} tickets available` 
+      });
+    }
+
+    if (price === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Price not available', 
+        message: `Pricing information not available for ${event.title}` 
       });
     }
 
@@ -311,7 +301,7 @@ router.post('/:id/reserve', verifyApiKey, async (req, res) => {
         seatId, 
         quantity, 
         eventTitle: event.title, 
-        price: Math.round(lowestPrice)
+        price: Math.round(price)
       },
       { headers: { 'x-api-key': process.env.TICKET_API_KEY }, timeout: 5000 }
     );
@@ -334,7 +324,7 @@ router.post('/:id/reserve', verifyApiKey, async (req, res) => {
       eventId: id,
       eventTitle: event.title,
       quantity,
-      estimatedPrice: Math.round(lowestPrice * quantity),
+      estimatedPrice: Math.round(price * quantity),
       checkoutUrl: checkoutData.checkoutUrl,
       sessionId: checkoutData.sessionId,
       seatId,
