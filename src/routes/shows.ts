@@ -1,16 +1,16 @@
 // src/routes/shows.ts
-import express from 'express';
-import axios from 'axios';
-import Stripe from 'stripe';
-import { logger } from '../utils/logger';
+//import express from 'express';
+//import axios from 'axios';
+//import Stripe from 'stripe';
+//import { logger } from '../utils/logger';
 
 const router = express.Router();
 
-const SEATGEEK_API_BASE = 'https://api.seatgeek.com/2';
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-08-27.basil' });
+//const SEATGEEK_API_BASE = 'https://api.seatgeek.com/2';
+//const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2025-08-27.basil' });
 
 const verifyApiKey = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const apiKey = req.headers['x-api-key'] as string | undefined;
+  //const apiKey = req.headers['x-api-key'] as string | undefined;
   const expectedApiKey = process.env.TICKET_API_KEY;
 
   if (!expectedApiKey) {
@@ -25,7 +25,7 @@ const verifyApiKey = (req: express.Request, res: express.Response, next: express
 };
 
 // Fetch events directly from SeatGeek API
-router.get('/', verifyApiKey, async (req, res) => {
+//router.get('/', verifyApiKey, async (req, res) => {
   try {
     const clientId = process.env.SEATGEEK_CLIENT_ID;
     if (!clientId) {
@@ -53,7 +53,7 @@ router.get('/', verifyApiKey, async (req, res) => {
 });
 
 // Fetch single event directly from SeatGeek API
-router.get('/:id', verifyApiKey, async (req, res) => {
+//router.get('/:id', verifyApiKey, async (req, res) => {
   try {
     const clientId = process.env.SEATGEEK_CLIENT_ID;
     if (!clientId) {
@@ -84,7 +84,7 @@ router.get('/:id', verifyApiKey, async (req, res) => {
 });
 
 // Reserve endpoint with Stripe integration
-router.post('/:id/reserve', verifyApiKey, async (req, res) => {
+//router.post('/:id/reserve', verifyApiKey, async (req, res) => {
   try {
     const clientId = process.env.SEATGEEK_CLIENT_ID;
     if (!clientId) {
@@ -175,7 +175,7 @@ router.post('/:id/reserve', verifyApiKey, async (req, res) => {
 });
 
 // Confirm reservation (e.g., after Stripe payment webhook)
-router.post('/:id/confirm', verifyApiKey, async (req, res) => {
+//router.post('/:id/confirm', verifyApiKey, async (req, res) => {
   try {
     const clientId = process.env.SEATGEEK_CLIENT_ID;
     if (!clientId) {
@@ -231,4 +231,4 @@ router.post('/:id/confirm', verifyApiKey, async (req, res) => {
   }
 });
 
-export default router;
+//export default router;
